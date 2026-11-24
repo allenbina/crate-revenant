@@ -1,0 +1,5 @@
+*
+!Dockerfile
+!requirements.txt
+!music_stream/
+!music_stream/*.py

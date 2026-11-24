@@ -1,0 +1,45 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local.*
+credentials.*
+*_credentials.*
+secrets.*
+*_secret.*
+secrets/
+private/
+.infisical.json
+.netrc
+*.password
+*.token
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Private setup notes and user data
+/handoff.md
+/data/
+*.sqlite*
+*.db
+*.log
+*.mp3
+*.wav
+*.flac
+*.aiff
+*.aif
+*.m4a
+*.aac
+*.ogg
+*.opus
+
+# Local build and operating-system files
+.venv/
+__pycache__/
+*.py[cod]
+*.app/
+build/
+dist/
+.DS_Store
+Thumbs.db
