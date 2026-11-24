@@ -1,0 +1,734 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 95eb1c8f217586574372a7b6e03622a89f126e3f..fcb04ad6e71c538bc83ad1cabf288e6d263cda33 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -984,6 +984,8 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/library/itunes/itunesxmlimporter.cpp
+   src/library/library_prefs.cpp
+   src/library/library.cpp
++  src/library/craterevenant/craterevenantclient.cpp
++  src/library/craterevenant/craterevenantfeature.cpp
+   src/library/librarycontrol.cpp
+   src/library/libraryfeature.cpp
+   src/library/librarytablemodel.cpp
+diff --git a/src/library/craterevenant/craterevenantclient.cpp b/src/library/craterevenant/craterevenantclient.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..6019c966079020dfd6184ff9d909150a6d396408
+--- /dev/null
++++ b/src/library/craterevenant/craterevenantclient.cpp
+@@ -0,0 +1,196 @@
++#include "library/craterevenant/craterevenantclient.h"
++
++#include <QCryptographicHash>
++#include <QDir>
++#include <QFileInfo>
++#include <QJsonArray>
++#include <QJsonDocument>
++#include <QJsonObject>
++#include <QNetworkReply>
++#include <QNetworkRequest>
++#include <QRegularExpression>
++#include <QSaveFile>
++#include <QStandardPaths>
++#include <QStringList>
++#include <memory>
++#include <utility>
++
++namespace mixxx::crate_revenant {
++namespace {
++
++QString errorFor(QNetworkReply* reply) {
++    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
++    if (status == 401 || status == 403) {
++        return QStringLiteral("Check the Crate Revenant API token.");
++    }
++    if (status != 200) {
++        return status ? QStringLiteral("Crate Revenant returned HTTP %1.").arg(status)
++                      : QStringLiteral("Could not reach Crate Revenant.");
++    }
++    if (reply->error() != QNetworkReply::NoError) {
++        return QStringLiteral("The Crate Revenant request was interrupted.");
++    }
++    return {};
++}
++
++} // namespace
++
++Client::Client(QString dataDirectory)
++        : m_dataDirectory(dataDirectory.isEmpty()
++                        ? QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
++                        : std::move(dataDirectory)) {
++    m_network.setAutoDeleteReplies(true);
++}
++
++bool Client::configure(QUrl server, QByteArray token) {
++    if (!server.isValid() || server.host().isEmpty() ||
++            (server.scheme() != QStringLiteral("http") && server.scheme() != QStringLiteral("https")) ||
++            !server.userInfo().isEmpty() || server.hasQuery() || server.hasFragment() ||
++            token.contains('\r') || token.contains('\n')) {
++        return false;
++    }
++    auto basePath = server.path();
++    while (basePath.endsWith(QLatin1Char('/'))) {
++        basePath.chop(1);
++    }
++    server.setPath(basePath);
++    m_server = std::move(server);
++    m_token = std::move(token);
++    return true;
++}
++
++bool Client::configured() const {
++    return !m_server.isEmpty();
++}
++
++QNetworkRequest Client::request(const QStringList& path) const {
++    QUrl url = m_server;
++    QString suffix;
++    for (const auto& segment : path) {
++        suffix += QLatin1Char('/') + QString::fromLatin1(QUrl::toPercentEncoding(segment));
++    }
++    url.setPath(url.path(QUrl::FullyEncoded) + QStringLiteral("/api/v1") + suffix, QUrl::StrictMode);
++    QNetworkRequest request(url);
++    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
++    request.setTransferTimeout(30000);
++    if (!m_token.isEmpty()) {
++        request.setRawHeader("Authorization", "Bearer " + m_token);
++    }
++    return request;
++}
++
++void Client::get(const QStringList& path, JsonResult done) {
++    auto* reply = m_network.get(request(path));
++    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, done = std::move(done)] {
++        QString error = errorFor(reply);
++        if (!error.isEmpty()) {
++            done({}, std::move(error));
++            return;
++        }
++        const auto document = QJsonDocument::fromJson(reply->readAll());
++        if (!document.isArray()) {
++            done({}, QStringLiteral("Expected a list from Crate Revenant."));
++            return;
++        }
++        done(document.array(), {});
++    });
++}
++
++void Client::sources(JsonResult done) {
++    get({QStringLiteral("sources")}, std::move(done));
++}
++
++void Client::playlists(const QString& source, JsonResult done) {
++    get({QStringLiteral("sources"), source, QStringLiteral("playlists")}, std::move(done));
++}
++
++void Client::tracks(const QString& source, const QString& playlist, JsonResult done) {
++    get({QStringLiteral("sources"), source, QStringLiteral("playlists"), playlist, QStringLiteral("tracks")},
++            std::move(done));
++}
++
++void Client::search(const QString& query, JsonResult rows, JsonResult done) {
++    auto searchRequest = request({QStringLiteral("search")});
++    auto url = searchRequest.url();
++    url.setQuery(QStringLiteral("q=") + QString::fromLatin1(QUrl::toPercentEncoding(query)),
++            QUrl::StrictMode);
++    searchRequest.setUrl(url);
++    auto* reply = m_network.get(searchRequest);
++    auto read = [reply, rows = std::move(rows)] {
++        if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200) {
++            return;
++        }
++        while (reply->canReadLine()) {
++            const auto document = QJsonDocument::fromJson(reply->readLine());
++            if (document.isObject()) {
++                rows(document.object(), {});
++            }
++        }
++    };
++    QObject::connect(reply, &QNetworkReply::readyRead, reply, read);
++    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, read, done = std::move(done)] {
++        read();
++        done({}, errorFor(reply));
++    });
++}
++
++void Client::prepare(const QString& id,
++        const QString& format,
++        AudioProgress progress,
++        AudioResult done) {
++    static const QRegularExpression suffix(QStringLiteral("^[a-zA-Z0-9]{1,12}$"));
++    if (id.isEmpty() || !suffix.match(format).hasMatch()) {
++        done({}, QStringLiteral("The track does not have a supported file format."));
++        return;
++    }
++    if (m_dataDirectory.isEmpty() || !QDir(m_dataDirectory).mkpath(QStringLiteral("CrateRevenant"))) {
++        done({}, QStringLiteral("Could not create the Crate Revenant cache."));
++        return;
++    }
++    const QByteArray cacheIdentity = m_server.toEncoded() + '\0' + id.toUtf8();
++    const auto cacheKey = QCryptographicHash::hash(cacheIdentity, QCryptographicHash::Sha256).toHex();
++    const auto path = QDir(m_dataDirectory).filePath(QStringLiteral("CrateRevenant/") +
++            QString::fromLatin1(cacheKey) + QLatin1Char('.') + format.toLower());
++    if (QFileInfo(path).size() > 0) {
++        done(path, {});
++        return;
++    }
++    auto file = std::make_shared<QSaveFile>(path);
++    if (!file->open(QIODevice::WriteOnly)) {
++        done({}, QStringLiteral("Could not open the Crate Revenant cache file."));
++        return;
++    }
++    auto* reply = m_network.get(request({QStringLiteral("tracks"), id, QStringLiteral("audio")}));
++    auto write = [reply, file] {
++        if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200) {
++            return;
++        }
++        const auto bytes = reply->readAll();
++        if (file->write(bytes) != bytes.size()) {
++            file->cancelWriting();
++            reply->abort();
++        }
++    };
++    QObject::connect(reply, &QNetworkReply::readyRead, reply, write);
++    QObject::connect(reply, &QNetworkReply::downloadProgress, reply, std::move(progress));
++    QObject::connect(reply, &QNetworkReply::finished, reply,
++            [reply, file, path, write, done = std::move(done)] {
++                write();
++                auto error = errorFor(reply);
++                const auto expected = reply->header(QNetworkRequest::ContentLengthHeader);
++                if (error.isEmpty() && (file->size() <= 0 ||
++                         (expected.isValid() && expected.toLongLong() != file->size()))) {
++                    error = QStringLiteral("The audio download was incomplete.");
++                }
++                if (error.isEmpty() && !file->commit()) {
++                    error = QStringLiteral("Could not save the completed audio file.");
++                }
++                if (!error.isEmpty()) {
++                    file->cancelWriting();
++                }
++                const QString completedPath = error.isEmpty() ? path : QString();
++                done(completedPath, std::move(error));
++            });
++}
++
++} // namespace mixxx::crate_revenant
+diff --git a/src/library/craterevenant/craterevenantclient.h b/src/library/craterevenant/craterevenantclient.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a665c6a17d9cd9a20b1102ef04e3d26d63c180a6
+--- /dev/null
++++ b/src/library/craterevenant/craterevenantclient.h
+@@ -0,0 +1,42 @@
++#pragma once
++
++#include <QJsonValue>
++#include <QNetworkAccessManager>
++#include <QStringList>
++#include <QUrl>
++#include <functional>
++
++class QNetworkReply;
++class QNetworkRequest;
++
++namespace mixxx::crate_revenant {
++
++class Client final {
++  public:
++    using JsonResult = std::function<void(QJsonValue, QString)>;
++    using AudioResult = std::function<void(QString, QString)>;
++    using AudioProgress = std::function<void(qint64, qint64)>;
++
++    explicit Client(QString dataDirectory = {});
++    bool configure(QUrl server, QByteArray token);
++    bool configured() const;
++    void sources(JsonResult done);
++    void playlists(const QString& source, JsonResult done);
++    void tracks(const QString& source, const QString& playlist, JsonResult done);
++    void search(const QString& query, JsonResult rows, JsonResult done);
++    void prepare(const QString& id,
++            const QString& format,
++            AudioProgress progress,
++            AudioResult done);
++
++  private:
++    QNetworkRequest request(const QStringList& path) const;
++    void get(const QStringList& path, JsonResult done);
++
++    QNetworkAccessManager m_network;
++    const QString m_dataDirectory;
++    QUrl m_server;
++    QByteArray m_token;
++};
++
++} // namespace mixxx::crate_revenant
+diff --git a/src/library/craterevenant/craterevenantfeature.cpp b/src/library/craterevenant/craterevenantfeature.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..eeb66f6cc3b79e18b244da6c60ac9f5c6be3e501
+--- /dev/null
++++ b/src/library/craterevenant/craterevenantfeature.cpp
+@@ -0,0 +1,411 @@
++#include "library/craterevenant/craterevenantfeature.h"
++
++#include <QDebug>
++#include <QHash>
++#include <QHeaderView>
++#include <QHBoxLayout>
++#include <QJsonArray>
++#include <QJsonObject>
++#include <QLabel>
++#include <QLineEdit>
++#include <QPushButton>
++#include <QShortcut>
++#include <QTableWidget>
++#include <QTimer>
++#include <QVBoxLayout>
++#include <memory>
++#include <utility>
++
++#include "library/craterevenant/craterevenantclient.h"
++#include "library/library.h"
++#include "library/libraryview.h"
++#include "library/sidebarmodel.h"
++#include "library/treeitem.h"
++#include "mixer/playermanager.h"
++#include "preferences/usersettings.h"
++#include "widget/wlibrary.h"
++#include "widget/wlibrarysidebar.h"
++
++namespace mixxx::crate_revenant {
++namespace {
++
++const QString kViewName = QStringLiteral("CrateRevenant");
++const ConfigKey kServerKey(QStringLiteral("[CrateRevenant]"), QStringLiteral("Server"));
++
++struct Source {
++    QString id;
++    QString name;
++    QJsonArray playlists;
++};
++
++} // namespace
++
++class View final : public QWidget, public LibraryView {
++  public:
++    View(WLibrary* parent,
++            Library* library,
++            UserSettingsPointer config,
++            std::function<void(const QList<Source>&)> updateSidebar)
++            : QWidget(parent),
++              m_library(library),
++              m_config(std::move(config)),
++              m_updateSidebar(std::move(updateSidebar)),
++              m_server(new QLineEdit(m_config->getValueString(kServerKey), this)),
++              m_token(new QLineEdit(this)),
++              m_status(new QLabel(tr("Enter the Crate Revenant server address."), this)),
++              m_tracks(new QTableWidget(0, 4, this)),
++              m_client(m_config->getSettingsPath()) {
++        setStyleSheet(QStringLiteral(R"(
++            QLabel { color: #d5d5d5; }
++            QTableWidget {
++                background-color: #171717;
++                alternate-background-color: #202020;
++                color: #e2e2e2;
++                gridline-color: #303030;
++                border: 1px solid #393939;
++                selection-background-color: #24565e;
++                selection-color: #ffffff;
++            }
++            QHeaderView, QHeaderView::section {
++                background-color: #262626;
++                color: #e2e2e2;
++            }
++            QHeaderView::section {
++                padding: 4px;
++                border: 0;
++                border-right: 1px solid #393939;
++                border-bottom: 1px solid #393939;
++            }
++            QPushButton {
++                background-color: #2a2a2a;
++                color: #e2e2e2;
++                border: 1px solid #4a4a4a;
++                padding: 3px 9px;
++            }
++            QPushButton:hover, QPushButton:focus { border-color: #50868c; }
++            QPushButton:pressed { background-color: #24565e; }
++        )"));
++        auto* layout = new QVBoxLayout(this);
++        auto* connection = new QHBoxLayout();
++        m_server->setPlaceholderText(QStringLiteral("http://127.0.0.1:8087"));
++        m_token->setPlaceholderText(tr("Optional API token"));
++        m_token->setEchoMode(QLineEdit::Password);
++        auto* connectButton = new QPushButton(tr("Connect"), this);
++        connection->addWidget(new QLabel(tr("Server"), this));
++        connection->addWidget(m_server, 2);
++        connection->addWidget(m_token, 1);
++        connection->addWidget(connectButton);
++        layout->addLayout(connection);
++
++        m_tracks->setHorizontalHeaderLabels({tr("Title"), tr("Artist"), tr("Source"), tr("Playlists")});
++        m_tracks->setAlternatingRowColors(true);
++        m_tracks->verticalHeader()->hide();
++        m_tracks->setSelectionBehavior(QAbstractItemView::SelectRows);
++        m_tracks->setSelectionMode(QAbstractItemView::SingleSelection);
++        m_tracks->setEditTriggers(QAbstractItemView::NoEditTriggers);
++        m_tracks->horizontalHeader()->setStretchLastSection(true);
++        layout->addWidget(m_tracks);
++
++        auto* actions = new QHBoxLayout();
++        m_status->setTextFormat(Qt::PlainText);
++        actions->addWidget(m_status, 1);
++        for (int deck = 0; deck < 2; ++deck) {
++            auto* button = new QPushButton(tr("Load Deck %1").arg(deck + 1), this);
++            auto shortcut = QKeySequence(
++                    QKeyCombination(Qt::ShiftModifier, deck == 0 ? Qt::Key_Left : Qt::Key_Right));
++            auto* key = new QShortcut(shortcut, m_tracks);
++            key->setContext(Qt::WidgetWithChildrenShortcut);
++            connect(button, &QPushButton::clicked, this, [this, deck] { prepare(deck); });
++            connect(key, &QShortcut::activated, this, [this, deck] { prepare(deck); });
++            actions->addWidget(button);
++        }
++        layout->addLayout(actions);
++        connect(connectButton, &QPushButton::clicked, this, [this] { connectServer(); });
++        connect(m_server, &QLineEdit::returnPressed, this, [this] { connectServer(); });
++
++        m_searchTimer.setSingleShot(true);
++        m_searchTimer.setInterval(250);
++        connect(&m_searchTimer, &QTimer::timeout, this, [this] { search(); });
++    }
++
++    void onShow() override {
++    }
++
++    bool hasFocus() const override {
++        return m_tracks->hasFocus();
++    }
++
++    void setFocus() override {
++        m_tracks->setFocus();
++    }
++
++    void onSearch(const QString& query) override {
++        m_query = query.trimmed();
++        ++m_viewGeneration;
++        m_searchTimer.stop();
++        if (!m_client.configured()) {
++            return;
++        }
++        if (m_query.isEmpty()) {
++            showPlaylist(m_source, m_playlist);
++        } else {
++            m_searchTimer.start();
++        }
++    }
++
++    void showPlaylist(const QString& source, const QString& playlist) {
++        m_searchTimer.stop();
++        const auto generation = ++m_viewGeneration;
++        m_source = source;
++        m_playlist = playlist;
++        m_tracks->setRowCount(0);
++        if (source.isEmpty() || playlist.isEmpty()) {
++            m_status->setText(tr("Select a playlist or use the Mixxx search box."));
++            return;
++        }
++        m_status->setText(tr("Loading playlist…"));
++        m_client.tracks(source, playlist, [this, generation](QJsonValue value, const QString& error) {
++            if (generation != m_viewGeneration) {
++                return;
++            }
++            if (!error.isEmpty()) {
++                m_status->setText(error);
++                return;
++            }
++            appendTracks(value.toArray());
++            m_status->setText(tr("%1 tracks").arg(m_tracks->rowCount()));
++        });
++    }
++
++  private:
++    void connectServer() {
++        QString url = m_server->text().trimmed();
++        if (!url.contains(QStringLiteral("://"))) {
++            url.prepend(QStringLiteral("http://"));
++        }
++        if (!m_client.configure(QUrl(url), m_token->text().trimmed().toUtf8())) {
++            m_status->setText(tr("Enter an HTTP or HTTPS server URL."));
++            return;
++        }
++        const auto connection = ++m_connectionGeneration;
++        ++m_viewGeneration;
++        m_searchTimer.stop();
++        m_source.clear();
++        m_playlist.clear();
++        m_tracks->setRowCount(0);
++        m_sources.clear();
++        m_updateSidebar({});
++        m_status->setText(tr("Connecting…"));
++        m_client.sources([this, connection, url](QJsonValue value, const QString& error) {
++            if (connection != m_connectionGeneration) {
++                return;
++            }
++            if (!error.isEmpty()) {
++                m_status->setText(tr("%1 Server: %2").arg(error, url));
++                return;
++            }
++            m_config->setValue(kServerKey, url);
++            m_server->setText(url);
++            auto sources = std::make_shared<QList<Source>>();
++            for (const auto& object : value.toArray()) {
++                const auto entry = object.toObject();
++                const auto id = entry.value(QStringLiteral("id")).toString();
++                if (!id.isEmpty()) {
++                    const auto name = entry.value(QStringLiteral("name")).toString();
++                    m_sources.insert(id, name);
++                    sources->append({id, name, {}});
++                }
++            }
++            if (sources->isEmpty()) {
++                m_status->setText(tr("Connected. No sources are configured."));
++                return;
++            }
++            m_status->setText(tr("Connected. Loading playlists…"));
++            auto pending = std::make_shared<qsizetype>(sources->size());
++            for (qsizetype index = 0; index < sources->size(); ++index) {
++                m_client.playlists(sources->at(index).id,
++                        [this, connection, index, sources, pending](QJsonValue rows, const QString& error) {
++                            if (connection != m_connectionGeneration) {
++                                return;
++                            }
++                            auto& source = (*sources)[index];
++                            if (error.isEmpty()) {
++                                source.playlists = rows.toArray();
++                            } else {
++                                source.name += tr(" (unavailable)");
++                            }
++                            if (--(*pending) == 0) {
++                                m_updateSidebar(*sources);
++                                m_status->setText(tr("Connected to %1 sources. Expand a source on the left or use Mixxx search.")
++                                                          .arg(sources->size()));
++                            }
++                        });
++            }
++        });
++    }
++
++    void search() {
++        const auto generation = m_viewGeneration;
++        m_tracks->setRowCount(0);
++        m_status->setText(tr("Searching…"));
++        m_client.search(m_query,
++                [this, generation](QJsonValue value, const QString&) {
++                    const auto event = value.toObject();
++                    if (generation == m_viewGeneration && event.value(QStringLiteral("kind")) == QStringLiteral("tracks")) {
++                        appendTracks(event.value(QStringLiteral("rows")).toArray());
++                    }
++                },
++                [this, generation](QJsonValue, const QString& error) {
++                    if (generation == m_viewGeneration) {
++                        m_status->setText(error.isEmpty() ? tr("%1 matching tracks").arg(m_tracks->rowCount()) : error);
++                    }
++                });
++    }
++
++    void appendTracks(const QJsonArray& rows) {
++        for (const auto& value : rows) {
++            const auto track = value.toObject();
++            if (track.value(QStringLiteral("id")).toString().isEmpty()) {
++                continue;
++            }
++            QStringList playlists;
++            for (const auto& item : track.value(QStringLiteral("playlists")).toArray()) {
++                playlists.append(item.toObject().value(QStringLiteral("name")).toString());
++            }
++            const QString source = track.value(QStringLiteral("source_id")).toString();
++            const QStringList columns = {
++                    track.value(QStringLiteral("title")).toString(),
++                    track.value(QStringLiteral("artist")).toString(),
++                    m_sources.value(source, source),
++                    playlists.join(QStringLiteral(", ")),
++            };
++            const int row = m_tracks->rowCount();
++            m_tracks->insertRow(row);
++            for (int column = 0; column < columns.size(); ++column) {
++                m_tracks->setItem(row, column, new QTableWidgetItem(columns.at(column)));
++            }
++            m_tracks->item(row, 0)->setData(Qt::UserRole, track.toVariantMap());
++        }
++    }
++
++    void prepare(int deck) {
++        const auto* item = m_tracks->item(m_tracks->currentRow(), 0);
++        if (!item || m_preparing) {
++            return;
++        }
++        const auto track = item->data(Qt::UserRole).toMap();
++        if (!track.value(QStringLiteral("audio_available"), true).toBool()) {
++            m_status->setText(tr("Audio is unavailable for this track."));
++            return;
++        }
++        m_preparing = true;
++        const auto generation = m_connectionGeneration;
++        const auto title = item->text();
++        m_status->setText(tr("Preparing %1…").arg(title));
++        m_client.prepare(track.value(QStringLiteral("id")).toString(),
++                track.value(QStringLiteral("format")).toString(),
++                [this, generation, title](qint64 bytes, qint64 total) {
++                    if (generation == m_connectionGeneration && total > 0) {
++                        m_status->setText(tr("Preparing %1… %2%").arg(title).arg(bytes * 100 / total));
++                    }
++                },
++                [this, generation, deck](const QString& path, const QString& error) {
++                    m_preparing = false;
++                    if (generation != m_connectionGeneration) {
++                        return;
++                    }
++                    if (!error.isEmpty()) {
++                        m_status->setText(error);
++                        return;
++                    }
++                    m_library->slotLoadLocationToPlayer(path, PlayerManager::groupForDeck(deck), false);
++                    m_status->setText(tr("Sent to Deck %1").arg(deck + 1));
++                });
++    }
++
++    Library* const m_library;
++    const UserSettingsPointer m_config;
++    const std::function<void(const QList<Source>&)> m_updateSidebar;
++    QLineEdit* const m_server;
++    QLineEdit* const m_token;
++    QLabel* const m_status;
++    QTableWidget* const m_tracks;
++    QTimer m_searchTimer;
++    QHash<QString, QString> m_sources;
++    QString m_query;
++    QString m_source;
++    QString m_playlist;
++    quint64 m_connectionGeneration = 0;
++    quint64 m_viewGeneration = 0;
++    bool m_preparing = false;
++    Client m_client;
++};
++
++Feature::Feature(Library* library, UserSettingsPointer config)
++        : LibraryFeature(library, std::move(config), QStringLiteral("folder-music")),
++          m_sidebar(std::make_unique<TreeItemModel>()) {
++    m_sidebar->setRootItem(TreeItem::newRoot(this));
++}
++
++QVariant Feature::title() {
++    return QStringLiteral("Crate Revenant");
++}
++
++TreeItemModel* Feature::sidebarModel() const {
++    return m_sidebar.get();
++}
++
++void Feature::bindLibraryWidget(WLibrary* libraryWidget, KeyboardEventFilter*) {
++    const QPointer<Feature> feature(this);
++    auto* view = new View(libraryWidget, m_pLibrary, m_pConfig, [feature](const QList<Source>& sources) {
++        if (!feature) {
++            return;
++        }
++        std::vector<std::unique_ptr<TreeItem>> branches;
++        for (const auto& source : sources) {
++            auto branch = std::make_unique<TreeItem>(source.name);
++            for (const auto& playlist : source.playlists) {
++                const auto item = playlist.toObject();
++                branch->appendChild(item.value(QStringLiteral("name")).toString(),
++                        QStringList{source.id, item.value(QStringLiteral("id")).toString()});
++            }
++            branches.push_back(std::move(branch));
++        }
++        feature->m_sidebar->removeRows(0, feature->m_sidebar->rowCount());
++        feature->m_sidebar->insertTreeItemRows(std::move(branches), 0);
++        if (!sources.isEmpty() && feature->m_sidebarWidget) {
++            auto* model = qobject_cast<SidebarModel*>(feature->m_sidebarWidget->model());
++            if (model) {
++                feature->m_sidebarWidget->expand(model->getFeatureRootIndex(feature));
++            }
++        }
++    });
++    if (libraryWidget->registerView(kViewName, view)) {
++        m_view = view;
++        qDebug("Crate Revenant library view registered");
++    } else {
++        view->deleteLater();
++    }
++}
++
++void Feature::bindSidebarWidget(WLibrarySidebar* sidebarWidget) {
++    m_sidebarWidget = sidebarWidget;
++}
++
++void Feature::activate() {
++    emit switchToView(kViewName);
++    emit restoreSearch(QString());
++}
++
++void Feature::activateChild(const QModelIndex& index) {
++    if (!m_view) {
++        return;
++    }
++    activate();
++    const auto playlist = index.data(SidebarModel::DataRole).toStringList();
++    if (playlist.size() == 2) {
++        m_view->showPlaylist(playlist[0], playlist[1]);
++    }
++}
++
++} // namespace mixxx::crate_revenant
+diff --git a/src/library/craterevenant/craterevenantfeature.h b/src/library/craterevenant/craterevenantfeature.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..1d5bd8202737f615f0a562f3c67323e9563845b2
+--- /dev/null
++++ b/src/library/craterevenant/craterevenantfeature.h
+@@ -0,0 +1,28 @@
++#pragma once
++
++#include <QPointer>
++#include <memory>
++
++#include "library/libraryfeature.h"
++
++namespace mixxx::crate_revenant {
++
++class View;
++
++class Feature final : public LibraryFeature {
++  public:
++    Feature(Library* library, UserSettingsPointer config);
++    QVariant title() override;
++    TreeItemModel* sidebarModel() const override;
++    void bindLibraryWidget(WLibrary* libraryWidget, KeyboardEventFilter* keyboard) override;
++    void bindSidebarWidget(WLibrarySidebar* sidebarWidget) override;
++    void activate() override;
++    void activateChild(const QModelIndex& index) override;
++
++  private:
++    const std::unique_ptr<TreeItemModel> m_sidebar;
++    QPointer<WLibrarySidebar> m_sidebarWidget;
++    QPointer<View> m_view;
++};
++
++} // namespace mixxx::crate_revenant
+diff --git a/src/library/library.cpp b/src/library/library.cpp
+index 3a17c062256ced552051c62d3d82ef03face78cf..a3a6ee407268a4a65e21955ffddc8facb0f19c55 100644
+--- a/src/library/library.cpp
++++ b/src/library/library.cpp
+@@ -10,6 +10,7 @@
+ #include "library/autodj/autodjfeature.h"
+ #include "library/banshee/bansheefeature.h"
+ #include "library/browse/browsefeature.h"
++#include "library/craterevenant/craterevenantfeature.h"
+ #ifdef __ENGINEPRIME__
+ #include "library/export/libraryexporter.h"
+ #endif
+@@ -90,6 +91,7 @@ Library::Library(
+             this,
+             m_pConfig);
+     addFeature(m_pMixxxLibraryFeature);
++    addFeature(new mixxx::crate_revenant::Feature(this, m_pConfig));
+ #ifdef __ENGINEPRIME__
+     connect(m_pMixxxLibraryFeature,
+             &MixxxLibraryFeature::exportLibrary,

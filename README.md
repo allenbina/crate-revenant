@@ -21,7 +21,7 @@ Saved settings take precedence over environment defaults for the same provider.
 
 In the Spotify Developer Dashboard, add `http://127.0.0.1:8087/settings/spotify/callback` to the app's redirect URIs. On the middleware computer, open Settings, save the Spotify app client ID, and select **Connect Spotify** to approve playlist access. The middleware keeps the refresh token in the Docker data volume and shows the account's playlists as a flat list. Spotify catalog results and playlist tracks can be browsed once you connect the account. Spotify file delivery depends on Spotizerr.
 
-Use the **Spotizerr** section on the same Settings page to save its base URL and test API access. For a Cloudflare Access protected endpoint, enter its service token client ID and secret. Enter the Spotizerr application token if the service also requires one. Saved secrets stay in the middleware data volume. Enter any required credentials again when changing the URL.
+Use the **Spotizerr** section on the same Settings page to save its direct server URL, including the port, and test API access. Enter the application token if Spotizerr requires one. The middleware stores the token in its data volume and asks for it again when the server URL changes.
 
 | Variable | Value |
 | --- | --- |
@@ -59,6 +59,8 @@ python -m venv .venv
 [The native Scratch Live companion](clients/scratch-live/README.md) can browse playlists, download tracks and send a completed file to a calibrated Scratch Live deck.
 
 [The desktop companion](clients/mixxx/README.md) can search the same sources and drag a prepared local file onto a Mixxx deck.
+
+[The native Mixxx preview](clients/mixxx/native/README.md) adds Crate Revenant to the Mixxx library sidebar and loads tracks directly into a deck.
 
 Open `http://127.0.0.1:8080/` for the browser frontend. To use it on a different device, open the API's published address on that device. When an API token is configured, use `music-stream` as the browser username and the API token as its password. The browser uses HTTP Basic authentication. Use HTTPS or a private, encrypted network for authenticated browser access.
 

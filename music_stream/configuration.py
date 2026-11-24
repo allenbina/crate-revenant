@@ -32,19 +32,12 @@ class SpotifySettings:
 @dataclass(frozen=True)
 class SpotizerrSettings:
     url: str = ""
-    access_id: str = ""
-    access_secret: str = ""
     token: str = ""
 
     def validate(self):
         validate_url(self.url)
-        if bool(self.access_id) != bool(self.access_secret):
-            raise ValueError("Enter both Cloudflare Access service token fields.")
-        if self.access_id and urlsplit(self.url).scheme != "https":
-            raise ValueError("Use an HTTPS URL with a Cloudflare Access service token.")
-        for value in (self.access_id, self.access_secret, self.token):
-            if any(not 33 <= ord(character) <= 126 for character in value):
-                raise ValueError("Credentials must contain printable characters without spaces.")
+        if any(not 33 <= ord(character) <= 126 for character in self.token):
+            raise ValueError("The application token must contain printable characters without spaces.")
 
 
 def validate_url(url: str):
@@ -75,11 +68,12 @@ class Settings:
             "spotizerr": SpotizerrSettings(),
         }
         try:
-            self.saved = {
-                kind: type(self.defaults[kind])(**value)
-                for kind, value in json.loads(path.read_text(encoding="utf-8")).items()
-                if kind in self.defaults
-            }
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            if "spotizerr" in stored:
+                stored["spotizerr"].pop("access_id", None)
+                stored["spotizerr"].pop("access_secret", None)
+            self.saved = {kind: type(self.defaults[kind])(**value)
+                          for kind, value in stored.items() if kind in self.defaults}
         except FileNotFoundError:
             self.saved = {}
         except (ValueError, TypeError, AttributeError):

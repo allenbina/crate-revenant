@@ -492,14 +492,8 @@ async def update_spotizerr(request: Request):
     url = form.get("url", [""])[0].strip().rstrip("/")
     saved = state.settings.get("spotizerr")
     prior = saved if saved.url == url else SpotizerrSettings()
-    access_id = form.get("access_id", [""])[0].strip()
-    access_secret = form.get("access_secret", [""])[0].strip()
-    if access_id == prior.access_id or not access_id:
-        access_secret = access_secret or prior.access_secret
     config = SpotizerrSettings(
         url=url,
-        access_id=access_id or prior.access_id,
-        access_secret=access_secret,
         token=form.get("token", [""])[0].strip() or prior.token,
     )
 
@@ -512,8 +506,7 @@ async def update_spotizerr(request: Request):
         return page(str(error), 422)
     action = form.get("action", [""])[0]
     if action == "test":
-        client = Spotizerr(state.upstream_client, config.url, config.token,
-                           access_id=config.access_id, access_secret=config.access_secret)
+        client = Spotizerr(state.upstream_client, config.url, config.token)
         try:
             async with asyncio.timeout(12):
                 await client.test_connection()

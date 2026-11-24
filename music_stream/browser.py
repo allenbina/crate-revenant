@@ -100,16 +100,13 @@ def settings_page(settings, csrf: str, *, spotify_origin="", kind=None, draft=No
         style = "notice error" if status >= 400 else "notice"
         spotizerr_notice = f'<p class="{style}" role="status">{escape(notice)}</p>'
     same_server = spotizerr_value.url == spotizerr.url
-    access_placeholder = "Leave blank to keep saved secret" if same_server and spotizerr.access_secret else ""
     token_placeholder = "Leave blank to keep saved token" if same_server and spotizerr.token else ""
     config_sections.append(f"""<form action="/settings/spotizerr" method="post">
 <fieldset><legend>Spotizerr</legend>
 {spotizerr_notice}
 <input type="hidden" name="csrf" value="{escape(csrf)}">
 <label>Server URL<input type="url" name="url" value="{escape(spotizerr_value.url)}" required></label>
-<label>Cloudflare Access client ID<input name="access_id" value="{escape(spotizerr_value.access_id)}" autocomplete="off"></label>
-<label>Cloudflare Access client secret<input type="password" name="access_secret" autocomplete="new-password" placeholder="{access_placeholder}"></label>
-<label>Spotizerr application token<input type="password" name="token" autocomplete="new-password" placeholder="{token_placeholder}"></label>
+<label>Application token (optional)<input type="password" name="token" autocomplete="new-password" placeholder="{token_placeholder}"></label>
 <button name="action" value="save">Save settings</button>
 <button name="action" value="test">Test connection</button>
 </fieldset>

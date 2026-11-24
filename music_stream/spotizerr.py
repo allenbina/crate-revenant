@@ -11,13 +11,10 @@ from .spotify import spotify_id
 
 
 class Spotizerr:
-    def __init__(self, client: httpx.AsyncClient, url: str, token: str = "",
-                 *, access_id: str = "", access_secret: str = ""):
+    def __init__(self, client: httpx.AsyncClient, url: str, token: str = ""):
         self.client = client
         self.url = url.rstrip("/")
         self.headers = {"Authorization": f"Bearer {token}"} if token else {}
-        if access_id and access_secret:
-            self.headers.update({"CF-Access-Client-Id": access_id, "CF-Access-Client-Secret": access_secret})
 
     async def get(self, route: str) -> dict:
         try:
@@ -26,8 +23,10 @@ class Spotizerr:
             raise ProviderError(504, "Spotizerr timed out") from None
         except httpx.RequestError:
             raise ProviderError(502, "Spotizerr is unreachable") from None
-        if response.is_redirect or response.status_code in (401, 403):
-            raise ProviderError(502, "Spotizerr requires access credentials or rejected the credentials provided.")
+        if response.is_redirect:
+            raise ProviderError(502, "This URL redirected the API request. Use the direct Spotizerr server URL.")
+        if response.status_code in (401, 403):
+            raise ProviderError(502, "Spotizerr denied the API request. Check the URL and application token.")
         if response.status_code == 404:
             raise ProviderError(404, "Spotizerr did not find this job") from None
         if response.status_code == 429:

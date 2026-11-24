@@ -35,4 +35,4 @@ Run `.venv\Scripts\python.exe` on Windows or `.venv/bin/python` on Linux and mac
 
 Qt 6.12 provides wheels for Windows x64 and ARM64, macOS 14 or newer on Intel and Apple Silicon, and Linux x64 (glibc 2.34+) and ARM64 (glibc 2.39+). A Linux machine running Mixxx in Flatpak must let Mixxx read the companion's downloads directory. Use a build for your own OS and CPU when packaging.
 
-The first release uses standard file drops. A library pane inside Mixxx would require a native Mixxx integration. The companion keeps the same download and server settings usable from other DJ applications.
+For an in-app library pane, see the [native Mixxx preview](native/README.md). The desktop companion uses standard file drops and can also be used with other DJ applications.
